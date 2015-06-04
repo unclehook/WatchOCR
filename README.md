@@ -1,6 +1,5 @@
 # WatchOCR
 
-## Preface
 WatchOCR uses cuneiform, and exactimage to create text searchable PDFs from image only PDFs and Tiffs. WatchOCR can be remotely configured to monitor a watched folder for newly scanned PDFs for OCR conversion.
 
 WatchOCR can be remotely configured to monitor a watched folder for newly scanned PDFs for OCR conversion.
@@ -15,11 +14,12 @@ Source: http://sourceforge.net/projects/watchocr/
 * ghostscript
 * unpaper
 * libtiff-tools
-* *oracle-java6-installer (optional) (1)*
-* *ant (optional) (1)*
-* *ZXing-1.6(optional) (1)*
 * unzip
 * aspell-en (or other language)
+* Optional:
+  * oracle-java6-installer *(1)*
+  * ant *(1)*
+  * ZXing-1.6 *(1)*
 
 ## Installation
 * Download zip then extract
