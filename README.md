@@ -26,4 +26,4 @@ Source: http://sourceforge.net/projects/watchocr/
 * Copy watchocr and img2pdf into /usr/bin and make it executable
 
 ## Appendix
-1) for qrcode file rename
+(1) for qrcode file rename
