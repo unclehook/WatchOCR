@@ -1,0 +1,222 @@
+#! /bin/bash
+
+PREFIX=`mktemp -t -d img2pdf.XXXXXXXXXX`
+trap 'rm -rf $PREFIX' EXIT
+
+#list files only breaking on new lines (not spaces in file names)
+IFS=$'\n'
+directory="$(pwd)"
+umask 0002
+
+#initialize variables
+infile=
+outfile=
+webstatus="false"
+deskew="false"
+res="300"
+renamebyzxing="false"
+autorotate="false"
+rotateall="false"
+
+#Supported languages: eng ger fra rus swe spa ita ruseng ukr srp hrv pol dan por dut cze rum hun bul slo lav lit est tur
+lang="eng"
+
+#display usage statement
+function displayusage {
+	echo "Usage: $0 -i input-file -o output-file"
+	echo "input-file must be .pdf"
+        echo "Required"
+        echo "     -i input file"
+        echo "     -o output file"
+        echo "Options"
+        echo "     -m web status monitoring"
+        echo "     -d deskew and despeckel (much slower)"
+	echo "     -r output resolution"
+	echo "     -z enable barcode renaming"
+	echo "     -a auto-rotate all pages(much slower)"
+	echo "     -b auto-rotate based on first page"
+	exit 2
+}
+
+#update web status
+function updatestatus {
+if [ "$1" = "true" ]; then
+	cat /tmp/watchocr.log | sort -n > /var/www/status/watchocr.log
+fi
+}
+
+#check to make sure old files are not overwriten
+function dontoverwrite {
+    outbase=$(basename $2)
+    outdir=$(dirname $2)
+	if [ -e $2 ]; then
+        dtstamp=$(date +%s)
+        	mv $1 "$outdir/$dtstamp.$outbase"
+        	echo $$ $(date) Finished moving $outdir/$dtstamp.$outbase "<br>" >> /tmp/watchocr.log
+        else
+                mv $1 $2
+                echo $$ $(date) Finished moving $2 "<br>" >> /tmp/watchocr.log
+        fi
+}
+
+# Verify command line options and values
+# Display an error message if the input is not correct
+while getopts i:o:r:mdzab flag
+do      case "$flag" in
+        i)      infile="$OPTARG";;
+        o)      outfile="$OPTARG";;
+        m)      webstatus="true";;
+	d)	deskew="true";; 
+        r)      res="$OPTARG";;
+	z)      renamebyzxing="true";;
+	a)      autorotate="true";rotateall="true";;
+	b)	autorotate="true";;
+        ?)      displayusage;;
+        esac
+done
+
+if [[ -z "$infile" || -z "$outfile" ]]; then
+        displayusage
+fi
+
+
+#begin processing file
+
+basenm=$(basename $infile)
+cp $infile $PREFIX/
+infile=$PREFIX/$basenm
+
+pagecount=$(pdfinfo $infile | grep Pages: | awk '{print $2}')
+echo $$ $(date) Splitting $infile into $pagecount images "<br>" >> /tmp/watchocr.log
+
+updatestatus $webstatus
+
+bestrotation=0
+#precess each page in a file
+for page in $(seq 1 $pagecount)
+	do
+		echo \"$PREFIX/$basenm.$page.hocr.pdf\" >> $PREFIX/outline.txt
+
+		#check for color and convert to png
+		gs -dNOPAUSE -r50 -dBATCH -dFirstPage=$page -dLastPage=$page -sDEVICE=tiffsep -sOutputFile=$PREFIX/colorcheck $infile
+		if diff3 $PREFIX/colorcheck.Cyan.tif $PREFIX/colorcheck.Magenta.tif $PREFIX/colorcheck.Yellow.tif > /dev/null 2>&1 ;then
+			gs -dNOPAUSE -r$res -dBATCH -dFirstPage=$page -dLastPage=$page -sDEVICE=pngmono -sOutputFile=$PREFIX/$basenm.$page $infile
+			#echo BW
+		else
+			gs -dNOPAUSE -r$res -dBATCH -dFirstPage=$page -dLastPage=$page -sDEVICE=png16m -sOutputFile=$PREFIX/$basenm.$page $infile
+			#echo Color
+		fi
+
+		#use unpaper to deskew if requested
+
+		if [ $deskew = "true" ]; then
+			econvert -i $PREFIX/$basenm.$page -o $PREFIX/$basenm.$page.ppm
+			unpaper $PREFIX/$basenm.$page.ppm $PREFIX/$basenm.$page.ppm
+			econvert -i $PREFIX/$basenm.$page.ppm -o png:$PREFIX/$basenm.$page
+			rm -f $PREFIX/$basenm.$page.ppm
+		fi
+
+		echo $$ $(date) OCRing $PREFIX/$basenm.$page "<br>" >> /tmp/watchocr.log
+		updatestatus $webstatus
+
+		if [ $autorotate = "true" ]; then
+
+			if [ $rotateall = "true" ] || [ $page = "1" ];then
+			#Compare OCR results for autorotate
+			econvert -i $PREFIX/$basenm.$page --colorspace BW -o $PREFIX/bw0.bmp --rotate 90 -o $PREFIX/bw90.bmp --rotate 90 -o $PREFIX/bw180.bmp --rotate 90 -o $PREFIX/bw270.bmp
+			for rotation in 0 90 180 270
+				do
+		                        cuneiform -l $lang -o $PREFIX/hocr$rotation.txt $PREFIX/bw$rotation.bmp
+					cat $PREFIX/hocr$rotation.txt | sed ':a;N;$!ba;s/\n//g' | sed -e ':repeat; s/ . / /g;s/ .. / /g;s/^. / /g;s/^.. / /g;s/[\d128-\d255\d0-\d31\d33-\d64]//g;t repeat' | aspell -a -l en | grep \* > $PREFIX/errors$rotation.txt
+					if [ $rotation = "0" ];then
+						echo {1..15} >> $PREFIX/errors$rotation.txt
+					fi
+					if [ "$(ls -S $PREFIX/errors*.txt | head -1)" = "$PREFIX/errors$rotation.txt" ];then
+						bestrotation=$rotation
+					fi
+				done
+			else
+				econvert -i $PREFIX/$basenm.$page --colorspace BW --rotate $bestrotation -o $PREFIX/bw$bestrotation.bmp
+			fi
+			echo $$ $(date) Best orientation for $PREFIX/$basenm.$page determined to be $bestrotation "<br>" >> /tmp/watchocr.log
+			cuneiform -l $lang -f hocr -o $PREFIX/hocr.html $PREFIX/bw$bestrotation.bmp
+			mv $PREFIX/bw$bestrotation.bmp $PREFIX/bw.bmp
+			econvert -i $PREFIX/$basenm.$page --rotate $bestrotation -o png:$PREFIX/$basenm.$page
+
+                else
+
+			#convert to BMP
+			econvert -i $PREFIX/$basenm.$page --colorspace BW -o $PREFIX/bw.bmp
+			#OCR output
+			cuneiform -l $lang -f hocr -o $PREFIX/hocr.html $PREFIX/bw.bmp
+
+		fi
+
+		#Capture any blank pages
+		if [ -e $PREFIX/hocr.html ]; then
+			hocr2pdf -s -i $PREFIX/$basenm.$page -o $PREFIX/$basenm.$page.hocr.pdf < $PREFIX/hocr.html
+		else
+			econvert -i $PREFIX/$basenm.$page -o $PREFIX/$basenm.$page.tif
+			tiff2pdf -o $PREFIX/$basenm.$page.hocr.pdf $PREFIX/$basenm.$page.tif
+			echo "Cuneiform returned blank page."
+		fi
+
+
+		#Search for barcode filename with zxing
+		if [ $renamebyzxing = "true" ]; then
+			if [ $page = "1" ]; then
+				cd /usr/local/share/zxing-1.6
+				java -cp javase/javase.jar:core/core.jar com.google.zxing.client.j2se.CommandLineRunner --try_harder $PREFIX/bw.bmp > $PREFIX/zxingout.txt
+				zxingresult="$(sed -n "3 p" $PREFIX/zxingout.txt)"
+				cd $directory
+			fi
+		fi
+
+		#capture errors
+		if [ ! -e $PREFIX/$basenm.$page ] || [ ! -e $PREFIX/$basenm.$page.hocr.pdf ];then
+			echo Error processing $PREFIX/$basenm.$page exiting
+			echo $$ $(date) Error processing $PREFIX/$basenm.$page exiting >> /tmp/watchocr.log
+			updatestatus $webstatus
+			exit 2
+		fi
+
+		#cleanup
+		rm -rf $PREFIX/$basenm.$page $PREFIX/$basenm.$page.tif $PREFIX/bw*.bmp $PREFIX/hocr*.html $PREFIX/errors*.txt $PREFIX/colorcheck*.tif
+		echo "$PREFIX/$basenm.$page.hocr.pdf created"
+
+	done
+
+echo $$ $(date) Combining $outfile "<br>" >> /tmp/watchocr.log
+updatestatus $webstatus
+
+#recombine pages
+gs -dBATCH -dNOPAUSE -r$res -sDEVICE=pdfwrite -sOutputFile=$PREFIX/$basenm.searchable.pdf @$PREFIX/outline.txt
+
+#rename based on barcode output
+cd $directory
+
+if [ "$zxingresult" = "" ]; then
+	dontoverwrite $PREFIX/$basenm.searchable.pdf $outfile
+	echo $$ $(date) Finished processing $outfile "<br>" >> /tmp/watchocr.log
+else
+	if [ "${zxingresult:0:1}" = "/" ];then
+                zxingresult=.$zxingresult
+        fi
+
+	mknewdir=$(dirname $zxingresult)
+	mkdir -p $mknewdir
+
+	#add pdf file extension if missing
+	if [ "${zxingresult#*.}" = "pdf" ]; then
+		mv $PREFIX/$basenm.searchable.pdf $zxingresult
+		echo $$ $(date) Finished processing $zxingresult "<br>" >> /tmp/watchocr.log
+	else
+		mv $PREFIX/$basenm.searchable.pdf $zxingresult.pdf
+		echo $$ $(date) Finished processing $zxingresult.pdf "<br>" >> /tmp/watchocr.log
+	fi
+fi
+
+#cleanup
+rm -rf $PREFIX/*
+
+updatestatus $webstatus
