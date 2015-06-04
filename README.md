@@ -18,7 +18,9 @@ Source: http://sourceforge.net/projects/watchocr/
 * *ant (optional) (1)*
 * *ZXing-1.6(optional) (1)*
 * unzip
-* aspell-en(1) for qrcode file rename
+* aspell-en
+
+(1) for qrcode file rename
 
 ## Installation
 * Download zip then extract
