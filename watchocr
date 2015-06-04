@@ -1,0 +1,208 @@
+#! /bin/bash
+
+#setup environment
+
+PREFIX=`mktemp -t -d watchocr.XXXXXXXXXX`
+trap 'rm -rf $PREFIX' EXIT
+
+#list files only breaking on new lines (not spaces in file names)
+IFS=$'\n'
+directory="$(pwd)"
+
+cd $outfolder
+umask 0002
+
+#initialize variables
+infolder=
+outfoler=
+preserve=
+webstatus=
+deskew=
+res="300"
+renamebyzxing=
+autorotate=
+maxProcesses=4
+
+#display usage statement
+function displayusage {
+	echo "Usage: $0 -i input-directory -o output-directory"
+        echo "Required"
+        echo "     -i input directory"
+        echo "     -o output directory"
+        echo "Options"
+        echo "     -m web status monitoring"
+        echo "     -p preserve originals-directory"
+        echo "     -d deskew and despeckel (much slower)"
+	echo "     -r output resolution"
+	echo "     -z enable barcode renaming"
+        echo "     -a auto-rotate all pages(much slower)"
+        echo "     -b auto-rotate based on first page"
+	exit 2
+}
+
+#update web status
+function updatestatus {
+if [ "$1" = "-m" ]; then
+	cat /tmp/watchocr.log | sort -n > /var/www/status/watchocr.log
+fi
+}
+
+#check to make sure old files are not overwriten
+function dontoverwrite {
+    basenm=$(basename $1)
+	if [ -e $2$basenm ]; then
+        dtstamp=$(date +%s)
+        	mv $1 $2$dtstamp.$basenm
+        	echo $$ $(date) Moved file to $2$dtstamp.$basenm "<br>" >> /tmp/watchocr.log
+        else
+                mv $1 $2$basenm
+                echo $$ $(date) Moved file to $2$basenm "<br>" >> /tmp/watchocr.log
+        fi
+}
+
+# Verify command line options and values
+# Display an error message if the input is not correct
+while getopts i:o:p:r:mdzab flag
+do      case "$flag" in
+        i)      infolder="$OPTARG";;
+        o)      outfolder="$OPTARG";;
+        p)      preserve="$OPTARG";;
+        m)      webstatus="-m";;
+	d)	deskew="-d";;
+	z)      renamebyzxing="-z";;
+	a)	autorotate="-a";;
+	b)	autorotate="-b";;
+        r)      res="$OPTARG";;
+        ?)      displayusage;;
+        esac
+done
+
+if [[ -z "$infolder" || -z "$outfolder" ]]; then
+        displayusage
+fi
+
+if [ "${infolder#${infolder%?}}" != "/" ];then
+        infolder=$infolder/
+fi
+
+if [ "${infolder:0:1}" != "/" ];then
+	infolder=$directory/$infolder
+	echo $infolder
+fi
+
+if [ "${outfolder#${outfolder%?}}" != "/" ];then
+        outfolder=$outfolder/
+fi
+
+if [ "${outfolder:0:1}" != "/" ];then
+        outfolder=$directory/$outfolder
+	echo $outfolder
+fi
+
+if [ "${preserve#${preserve%?}}" != "/" ] && [ -n "$preserve" ];then
+        preserve=$preserve/
+fi
+
+if [ "${preserve:0:1}" != "/" ] && [ -n "$preserve" ];then
+        preserve=$directory/$preserve
+	echo $preserve
+fi
+
+
+
+#initalize log files
+echo "" > /tmp/watchocr.log
+
+updatestatus $webstatus
+
+#watched folder loop
+while [ 1 ]
+do
+
+#look for new files and process them
+#process and convert .tif files
+for file in $(find $infolder -iname "*.tif" )
+	do
+		filestructure=${file/$infolder/}
+		filestructure=$(dirname $filestructure)/
+
+		if [ $(lsof -t $file | wc -l) -ge 1 ];then
+			echo "File $file still being written, skipping"
+		else
+			hash1=$(md5sum $file)
+                        sleep 5
+                        hash2=$(md5sum $file)
+                        if [ ! "$hash1" = "$hash2" ];then
+                                echo "File $file still being written, skipping"
+                        else
+				mkdir -p $PREFIX/$filestructure
+				echo $$ $(date) Processing $file ... "<br>" >> /tmp/watchocr.log 
+	                	updatestatus $webstatus
+				basenm=$(basename $file .tif)
+				tiff2pdf $file -o$PREFIX/$filestructure/$basenm.pdf
+				if [ -n "$preserve" ]; then
+					mkdir -p $preserve$filestructure
+					dontoverwrite $file $preserve$filestructure/
+				else
+					rm -rf $file
+				fi
+			fi
+		fi
+        done
+
+#process and convert .pdf files
+for file in $(find $infolder -iname "*.pdf" )
+        do
+		filestructure=${file/$infolder/}
+                filestructure=$(dirname $filestructure)/
+
+		if [ $(lsof -t $file | wc -l) -ge 1 ];then
+                        echo "File $file still being written, skipping"
+                else
+			hash1=$(md5sum $file)
+			sleep 5
+			hash2=$(md5sum $file)
+                	if [ ! "$hash1" = "$hash2" ];then
+                        	echo "File $file still being written, skipping"
+                	else
+				mkdir -p $PREFIX/$filestructure
+				echo $$ $(date) Processing $file ... "<br>" >> /tmp/watchocr.log
+				updatestatus $webstatus
+				cp $file $PREFIX/$filestructure
+				if [ -n "$preserve" ]; then
+					mkdir -p $preserve$filestructure
+					dontoverwrite $file $preserve$filestructure
+				else
+					rm -rf $file
+				fi
+			fi
+		fi
+	done
+
+#Process each pdf indepentantly
+for file in $(find $PREFIX -iname "*.pdf" )
+        do
+		filestructure=${file/$PREFIX/}
+                filestructure=$(dirname $filestructure)
+
+		while [ 1 ]
+			do
+				numLines=$(jobs | wc -l)
+				if [ "$numLines" -lt "$maxProcesses" ]; then
+					break
+				fi
+				sleep 1
+			done
+
+		basenm=$(basename $file)
+		mkdir -p $outfolder$filestructure
+		cd $outfolder
+		img2pdf -i $file -o "$outfolder$filestructure/$basenm" $webstatus $deskew -r $res $renamebyzxing $autorotate &
+
+ 		sleep 5
+		rm -f $file
+        done
+
+sleep 5
+
+done
